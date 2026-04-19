@@ -52,12 +52,17 @@ async def run_liepin(cfg: AppConfig, args):
     )
     util = PlaywrightUtil(browser_mgr)
 
+    ai_matcher = None
+    if cfg.ai.api_key or os.environ.get("ANTHROPIC_API_KEY"):
+        ai_matcher = AIMatcher(api_key=cfg.ai.api_key, model=cfg.ai.model)
+
     liepin = LiepinHandler(
         cookie_manager=cookie_mgr,
         db=db,
         delay_min=cfg.liepin.delay_min,
         delay_max=cfg.liepin.delay_max,
         daily_limit=args.limit or cfg.liepin.daily_limit,
+        ai_matcher=ai_matcher,
     )
     liepin.util = util
 

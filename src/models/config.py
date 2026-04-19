@@ -50,8 +50,11 @@ class AppConfig(BaseModel):
     @classmethod
     def from_yaml(cls, path: str | Path) -> "AppConfig":
         path = Path(path).expanduser()
-        with open(path) as f:
-            raw = yaml.safe_load(f)
+        try:
+            with open(path) as f:
+                raw = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"配置文件格式错误: {e}") from e
 
         # 展开环境变量 ${VAR} 或 ${VAR:default}
         raw = _expand_env(raw)

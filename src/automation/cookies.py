@@ -54,16 +54,15 @@ class CookieManager:
             return json.load(f)
 
     def is_valid(self) -> bool:
-        """简单检查 cookie 文件是否存在且非空"""
+        """检查 cookie 是否包含猎聘关键 cookie（acw_tc 或 TMS_UID）"""
         if not self.cookie_path.exists():
             return False
         cookies = self.load()
         if not cookies:
             return False
-        # 检查是否包含关键 cookie（如 session）
         names = {c.get("name", "") for c in cookies}
-        # 猎聘通常需要 acw_tc, TMS_UID 等
-        return bool(names)
+        # 猎聘关键 cookie：acw_tc (反爬验证) 或 TMS_UID (用户ID)
+        return bool(names & {"acw_tc", "TMS_UID"})
 
     async def apply_to_context(self, context: BrowserContext):
         """将保存的 cookie 应用到浏览器上下文"""

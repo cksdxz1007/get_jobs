@@ -24,6 +24,7 @@ from ..automation.browser import PlaywrightUtil, DeviceType
 from ..automation.cookies import CookieManager
 from ..db.database import Database
 from ..models.job import Job, ApplyResult
+from ..utils.ai import AIMatcher
 from .base import PlatformHandler
 
 
@@ -85,12 +86,14 @@ class LiepinHandler(PlatformHandler):
         delay_min: float = 3.0,
         delay_max: float = 8.0,
         daily_limit: int = 100,
+        ai_matcher: AIMatcher = None,
     ):
         self.cookie_manager = cookie_manager
         self.db = db
         self.delay_min = delay_min
         self.delay_max = delay_max
         self.daily_limit = daily_limit
+        self.ai_matcher = ai_matcher
         self.util = None  # injected by caller
 
         # 运行时状态
@@ -197,12 +200,12 @@ class LiepinHandler(PlatformHandler):
         api_entities_cache: list[dict] = []
         jobs: list[Job] = []
 
-        # 拦截 API 响应
-        async def handle_response(response):
+        # 使用 context.route() 一次性拦截，避免 page.on() 监听器泄漏
+        async def handle_route(route):
+            response = await route.fetch()
             if self.api_url_pattern in response.url and self.api_exclude_pattern not in response.url:
                 try:
-                    body = await response.json()
-                    # 从 JSON 中提取 jobCardList
+                    body = response.json()
                     card_list = (
                         body.get("data", {}).get("data", {}).get("jobCardList")
                         or body.get("data", {}).get("jobCardList", [])
@@ -212,84 +215,94 @@ class LiepinHandler(PlatformHandler):
                         api_entities_cache.extend(card_list)
                 except Exception:
                     pass
+            await route.continue_()
 
-        page.on("response", handle_response)
+        route_handle = page.context.on("route", handle_route)
 
         # 分页计数
         page_num = 0
         max_pages = 50
 
-        for page_num in range(1, max_pages + 1):
-            if self._stop_requested:
-                break
-
-            current_count = self.db.get_applied_count_today(self.platform_name)
-            if current_count >= self.daily_limit:
-                print(f"[Liepin] 今日已投 {current_count} 次，达到上限 {self.daily_limit}")
-                break
-
-            # 访问搜索页
-            url = f"{search_url}&curPage={page_num - 1}"
-            print(f"[Liepin] 访问第 {page_num} 页: {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            await asyncio.sleep(3)
-
-            # 等待职位卡片加载
-            try:
-                await page.wait_for_selector(
-                    "[class*='job-card'], .job-list-box, [class*='job-item']",
-                    timeout=10_000,
-                )
-            except Exception:
-                print(f"[Liepin] 第 {page_num} 页无职位，可能已到底")
-                break
-
-            # 收集所有职位卡片
-            card_selectors = [
-                "[class*='job-card-box']",
-                ".job-list-box > div",
-                "[class*='job-item']",
-            ]
-            cards = page.locator(card_selectors[0])
-            for sel in card_selectors:
-                cards = page.locator(sel)
-                if await cards.count() > 0:
-                    break
-
-            card_count = await cards.count()
-            print(f"[Liepin] 第 {page_num} 页发现 {card_count} 个职位")
-
-            if card_count == 0:
-                break
-
-            # 遍历每张卡片
-            for i in range(min(card_count, 20)):  # 每页最多取20个
+        try:
+            for page_num in range(1, max_pages + 1):
                 if self._stop_requested:
                     break
-                if self.db.get_applied_count_today(self.platform_name) >= self.daily_limit:
+
+                current_count = self.db.get_applied_count_today(self.platform_name)
+                if current_count >= self.daily_limit:
+                    print(f"[Liepin] 今日已投 {current_count} 次，达到上限 {self.daily_limit}")
                     break
 
+                # 访问搜索页
+                url = f"{search_url}&curPage={page_num - 1}"
+                print(f"[Liepin] 访问第 {page_num} 页: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_load_state('networkidle', timeout=10_000)
+
+                # 等待职位卡片加载
                 try:
-                    card = cards.nth(i)
-                    job = await self._parse_card(card, api_entities_cache, i)
-                    if job and not self.db.is_applied(job.platform, job.job_id):
-                        self.db.save_job(job)
-                        jobs.append(job)
-                        print(f"  [新职位] {job.title} @ {job.company}")
-                except Exception as e:
-                    print(f"  解析第 {i} 张卡片失败: {e}")
-
-            # 翻页
-            try:
-                next_btn = page.locator("[class*='next']:not([class*='disabled']), [class*='pager'] button:has-text('下一页')").first
-                if await next_btn.is_disabled() or not await next_btn.is_visible():
-                    print("[Liepin] 已到最后一页")
+                    await page.wait_for_selector(
+                        "[class*='job-card'], .job-list-box, [class*='job-item']",
+                        timeout=10_000,
+                    )
+                except Exception:
+                    print(f"[Liepin] 第 {page_num} 页无职位，可能已到底")
                     break
-                await next_btn.click()
-                await asyncio.sleep(2)
-            except Exception:
-                print("[Liepin] 未找到下一页按钮")
-                break
+
+                # 收集所有职位卡片 - 修复 selector 逻辑（去掉初始赋值，直接 for/else）
+                card_selectors = [
+                    "[class*='job-card-box']",
+                    ".job-list-box > div",
+                    "[class*='job-item']",
+                ]
+                cards = None
+                for sel in card_selectors:
+                    candidates = page.locator(sel)
+                    if await candidates.count() > 0:
+                        cards = candidates
+                        break
+                if cards is None:
+                    print(f"[Liepin] 第 {page_num} 页无职位卡片，停止翻页")
+                    break
+
+                card_count = await cards.count()
+                print(f"[Liepin] 第 {page_num} 页发现 {card_count} 个职位")
+
+                if card_count == 0:
+                    break
+
+                # 遍历每张卡片
+                for i in range(min(card_count, 20)):  # 每页最多取20个
+                    if self._stop_requested:
+                        break
+                    if self.db.get_applied_count_today(self.platform_name) >= self.daily_limit:
+                        break
+
+                    try:
+                        card = cards.nth(i)
+                        job = await self._parse_card(card, api_entities_cache, i)
+                        if job and not self.db.is_applied(job.platform, job.job_id):
+                            self.db.save_job(job)
+                            jobs.append(job)
+                            print(f"  [新职位] {job.title} @ {job.company}")
+                    except Exception as e:
+                        print(f"  解析第 {i} 张卡片失败: {e}")
+
+                # 翻页
+                try:
+                    next_btn = page.locator("[class*='next']:not([class*='disabled']), [class*='pager'] button:has-text('下一页')").first
+                    if await next_btn.is_disabled() or not await next_btn.is_visible():
+                        print("[Liepin] 已到最后一页")
+                        break
+                    await next_btn.click()
+                    await page.wait_for_load_state('networkidle', timeout=10000)
+                except Exception:
+                    print("[Liepin] 未找到下一页按钮")
+                    break
+        finally:
+            # 清理 route 监听器，避免泄漏
+            if route_handle:
+                await route_handle.dispose()
 
         return jobs
 
@@ -427,9 +440,11 @@ class LiepinHandler(PlatformHandler):
             await asyncio.sleep(2)
 
             # 检查聊天窗口是否出现
+            chat_opened = False
             try:
                 chat_panel = page.locator("[class*='chat'], [class*='im'], .chat-panel").first
                 if await chat_panel.is_visible(timeout=3000):
+                    chat_opened = True
                     print(f"[Liepin] 聊天窗口已打开: {job.title}")
                     # 关闭聊天窗口
                     close_btn = page.locator("[class*='close'], [class*='icon-close'], [class*='chat-close']").first
@@ -444,7 +459,10 @@ class LiepinHandler(PlatformHandler):
             self.db.update_job_status(job.id, "success", now)
             self._applied_today += 1
 
-            return ApplyResult(job, True, "聊一聊成功")
+            if chat_opened:
+                return ApplyResult(job, True, "聊一聊成功")
+            else:
+                return ApplyResult(job, False, "聊天窗口未出现，投递可能被拦截", "chat_not_opened")
 
         except Exception as e:
             self.db.update_job_status(job.id, "failed")
@@ -462,6 +480,22 @@ class LiepinHandler(PlatformHandler):
             if self.db.get_applied_count_today(self.platform_name) >= self.daily_limit:
                 print("[Liepin] 达到每日上限，停止")
                 break
+
+            # AI 匹配过滤（score >= 0.6 才投递）
+            if self.ai_matcher:
+                try:
+                    profile = {"skills": [], "desired_roles": [], "summary": ""}
+                    match_result = await self.ai_matcher.match_score(
+                        job.title,
+                        job.description or "",
+                        profile,
+                    )
+                    score = match_result.get("score", 0.5)
+                    if score < 0.6:
+                        print(f"  [AI过滤] {job.title} @ {job.company} (匹配分 {score:.2f} < 0.6)")
+                        continue
+                except Exception as e:
+                    print(f"  [AI匹配异常] {e}，跳过AI过滤")
 
             result = await self.apply(job, page)
             results.append(result)

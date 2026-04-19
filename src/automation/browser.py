@@ -5,16 +5,24 @@ import asyncio
 import json
 import random
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from playwright.async_api import (
-    AsyncPlaywright,
     Browser,
     BrowserContext,
     Page,
     Playwright,
-    DeviceType,
+    async_playwright,
 )
+
+# Custom enum instead of playwright's DeviceType (which doesn't exist in this version)
+class DeviceType:
+    DESKTOP = "desktop"
+    MOBILE = "mobile"
+
+# Alias for compatibility
+def get_playwright():
+    return async_playwright()
 
 from .stealth import STEALTH_JS
 
@@ -55,13 +63,14 @@ class BrowserManager:
         self._browser: Optional[Browser] = None
         self._context_desktop: Optional[BrowserContext] = None
         self._context_mobile: Optional[BrowserContext] = None
+        self._async_pw: Optional[Any] = None
 
     async def start(self):
         """启动 Playwright 和浏览器"""
         if self._browser:
             return
-        self._playwright = p = await AsyncPlaywright().start()
-        self._browser = await p.chromium.launch(
+        self._async_pw = pw = await async_playwright().__aenter__()
+        self._browser = await pw.chromium.launch(
             headless=self.headless,
             slow_mo=self.slowmo,
             args=[
@@ -110,6 +119,12 @@ class BrowserManager:
         # 注入反检测脚本
         await context.add_init_script(_load_stealth_js())
 
+        # 保存 context 引用，避免 close() 无法正确清理
+        if device_type == DeviceType.DESKTOP:
+            self._context_desktop = context
+        else:
+            self._context_mobile = context
+
         return context
 
     async def new_page(self, context: BrowserContext) -> Page:
@@ -124,12 +139,8 @@ class BrowserManager:
             await self._context_desktop.close()
         if self._browser:
             await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        self._browser = None
-        self._playwright = None
-        self._context_desktop = None
-        self._context_mobile = None
+        if self._async_pw:
+            await self._async_pw.__aexit__(None, None, None)
 
     async def screenshot(self, page: Page, path: str):
         await page.screenshot(path=path)
@@ -211,6 +222,7 @@ class PlaywrightUtil:
         el = page.locator(selector).first
         return await el.get_attribute(attr) if await el.count() > 0 else ""
 
+    @staticmethod
     async def screenshot(page: Page, path: str):
         await page.screenshot(path=path, full_page=False)
 

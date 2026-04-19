@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 try:
-    import telegram
+    from telegram import Bot
     HAS_TELEGRAM = True
 except ImportError:
     HAS_TELEGRAM = False
@@ -26,11 +26,20 @@ class TelegramNotifier:
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
         self.notify_on_success = notify_on_success
         self.notify_on_failure = notify_on_failure
-        self.bot = None
-        if self.bot_token and self.chat_id and HAS_TELEGRAM:
-            self.bot = telegram.Bot(token=self.bot_token)
+        self.bot: Bot = None  # type: ignore
+        self._started = False
+
+    async def _ensure_started(self):
+        """延迟异步初始化 bot（避免在 __init__ 中同步调用 start）"""
+        if self._started or not self.bot_token or not self.chat_id or not HAS_TELEGRAM:
+            return
+        self.bot = Bot(token=self.bot_token)
+        await self.bot.start()
+        self._started = True
 
     async def send(self, message: str):
+        if not self.bot:
+            await self._ensure_started()
         if not self.bot:
             print(f"[Telegram] (未配置，跳过发送): {message[:80]}")
             return
