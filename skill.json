@@ -1,0 +1,12 @@
+# skill 入口（用于 skill-vetter 安全审查）
+
+SKILL.md 文件内容：
+
+# skill.json
+{
+  "name": "jobflow-rewrite",
+  "version": "0.1.0",
+  "description": "JobFlow Python 重写版 - 猎聘自动化投递工具",
+  "trigger": "jobflow",
+  "entry": "main.py"
+}

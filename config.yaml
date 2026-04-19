@@ -1,0 +1,32 @@
+# JobFlow 配置
+
+platform: liepin
+
+keywords:
+  - Python 工程师
+  - 后端开发
+  - AI 工程师
+
+ai:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  api_key: ${ANTHROPIC_API_KEY:}
+
+browser:
+  headless: false
+  slowmo: 50
+
+liepin:
+  cookie_path: ~/.jobflow/cookies/liepin.json
+  daily_limit: 100
+  delay_min: 3
+  delay_max: 8
+
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN:}
+  chat_id: ${TELEGRAM_CHAT_ID:}
+  notify_on_success: true
+  notify_on_failure: false
+
+db:
+  path: ~/.jobflow/jobflow.db
